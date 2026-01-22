@@ -70,11 +70,12 @@ jobs:
 
     container:
       image: mcr.microsoft.com/playwright:v1.57.0-noble
-      options: --ipc=host
-
+      options: --user 1001
     steps:
-      - uses: actions/checkout@v4
-
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
       - name: Cache npm (download cache)
         uses: actions/cache@v4
         with:
@@ -82,10 +83,8 @@ jobs:
           key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-npm-
-
       - name: Install deps
         run: npm ci
-
       - name: Run Playwright tests (sharded)
         env:
           TEST_SUITE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.test-suite || '' }}
@@ -151,8 +150,10 @@ jobs:
       options: --ipc=host
 
     steps:
-      - uses: actions/checkout@v4
-
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
       - name: Cache npm (download cache)
         uses: actions/cache@v4
         with:
@@ -165,19 +166,20 @@ jobs:
         run: npm ci
 
       - name: Download shard blob reports
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           pattern: blob-report-*
           path: all-blob-reports
+          merge-multiple: true
 
       - name: Merge blob reports -> playwright-report
-        run: npx playwright merge-reports --reporter html all-blob-reports/**/blob-report
+        run: npx playwright merge-reports --reporter html ./all-blob-reports
 
       - name: Upload merged HTML report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-html-report
+          name: html-report--attempt-${{ github.run_attempt }}
           path: playwright-report
           retention-days: 14
 
