@@ -58,6 +58,7 @@ jobs:
   e2e-tests:
     name: E2E (shard ${{ matrix.shard }}/4) # ✅ fixed: don't reference env.* in name
     runs-on: ubuntu-latest
+    environment: ${{ github.ref == 'refs/heads/main' && 'staging' || 'Production' }}
     strategy:
       fail-fast: false
       matrix:
