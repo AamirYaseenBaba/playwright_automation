@@ -1,0 +1,193 @@
+name: Playwright E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      test-suite:
+        description: 'Regex/tag to grep (e.g. "@smoke") or blank for all'
+        required: false
+        default: ''
+      browser:
+        description: 'Playwright project name (chromium, firefox, webkit)'
+        required: false
+        default: 'chromium'
+      headless:
+        description: 'Run headless (true/false). If false, uses --headed'
+        required: false
+        default: 'true'
+      retries:
+        description: 'Retries for failed tests'
+        required: false
+        default: '0'
+      parallel:
+        description: 'Workers (0 for default)'
+        required: false
+        default: '0'
+      timeout:
+        description: 'Timeout in ms'
+        required: false
+        default: '30000'
+      report:
+        description: 'Generate & publish merged HTML report (true/false)'
+        required: false
+        default: 'true'
+      upload-artifacts:
+        description: 'Upload debug artifacts on failure (true/false)'
+        required: false
+        default: 'true'
+
+concurrency:
+  group: playwright-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+  pages: write
+  id-token: write
+
+env:
+  CI: true
+  SHARD_TOTAL: 4
+
+jobs:
+  e2e-tests:
+    name: E2E (shard ${{ matrix.shard }}/4) # ✅ fixed: don't reference env.* in name
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+
+    container:
+      image: mcr.microsoft.com/playwright:v1.57.0-noble
+      options: --ipc=host
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache npm (download cache)
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Run Playwright tests (sharded)
+        env:
+          TEST_SUITE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.test-suite || '' }}
+          BROWSER: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.browser || 'chromium' }}
+          HEADLESS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.headless || 'true' }}
+          RETRIES: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.retries || '0' }}
+          WORKERS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.parallel || '0' }}
+          TIMEOUT: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.timeout || '30000' }}
+
+          BASE_URL: ${{ secrets.E2E_BASE_URL }}
+          E2E_USERNAME: ${{ secrets.E2E_USERNAME }}
+          E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
+          API_TOKEN: ${{ secrets.API_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          args=()
+          args+=(--reporter=blob)
+          args+=(--shard="${{ matrix.shard }}/${SHARD_TOTAL}")
+          args+=(--project="${BROWSER}")
+          args+=(--retries="${RETRIES}")
+          args+=(--timeout="${TIMEOUT}")
+
+          if [ "${HEADLESS}" != "true" ]; then
+            args+=(--headed)
+          fi
+
+          if [ "${WORKERS}" != "0" ]; then
+            args+=(--workers="${WORKERS}")
+          fi
+
+          if [ -n "${TEST_SUITE}" ]; then
+            args+=(--grep="${TEST_SUITE}")
+          fi
+
+          npx playwright test "${args[@]}"
+
+      - name: Upload blob report (shard)
+        if: always() && (github.event_name != 'workflow_dispatch' || github.event.inputs.report == 'true')
+        uses: actions/upload-artifact@v4
+        with:
+          name: blob-report-${{ matrix.shard }}
+          path: blob-report
+          retention-days: 7
+
+      - name: Upload debug artifacts (failure only)
+        if: failure() && (github.event_name != 'workflow_dispatch' || github.event.inputs.upload-artifacts == 'true')
+        uses: actions/upload-artifact@v4
+        with:
+          name: pw-debug-${{ matrix.shard }}
+          path: test-results
+          retention-days: 7
+
+  merge-report:
+    name: Merge HTML report
+    runs-on: ubuntu-latest
+    needs: [e2e-tests]
+    if: always() && (github.event_name != 'workflow_dispatch' || github.event.inputs.report == 'true')
+
+    container:
+      image: mcr.microsoft.com/playwright:v1.57.0-noble
+      options: --ipc=host
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache npm (download cache)
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Download shard blob reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: blob-report-*
+          path: all-blob-reports
+
+      - name: Merge blob reports -> playwright-report
+        run: npx playwright merge-reports --reporter html all-blob-reports/**/blob-report
+
+      - name: Upload merged HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-html-report
+          path: playwright-report
+          retention-days: 14
+
+      - name: Upload Pages artifact
+        if: always() && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: playwright-report
+
+  deploy-pages:
+    name: Deploy report to GitHub Pages
+    runs-on: ubuntu-latest
+    needs: [merge-report]
+    if: always() && github.ref == 'refs/heads/main' && (github.event_name != 'workflow_dispatch' || github.event.inputs.report == 'true')
+    environment:
+      name: github-pages
+
+    steps:
+      - uses: actions/deploy-pages@v4
