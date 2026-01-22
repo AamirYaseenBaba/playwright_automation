@@ -50,13 +50,17 @@ permissions:
   pages: write
   id-token: write
 
+defaults:
+  run:
+    shell: bash
+
 env:
   CI: true
   SHARD_TOTAL: 4
 
 jobs:
   e2e-tests:
-    name: E2E (shard ${{ matrix.shard }}/4) # ✅ fixed: don't reference env.* in name
+    name: E2E (shard ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
     environment: ${{ github.ref == 'refs/heads/main' && 'staging' || 'Production' }}
     strategy:
@@ -91,9 +95,11 @@ jobs:
           WORKERS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.parallel || '0' }}
           TIMEOUT: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.timeout || '30000' }}
 
-          BASE_URL: ${{ secrets.E2E_BASE_URL }}
-          E2E_USERNAME: ${{ secrets.E2E_USERNAME }}
-          E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
+          BASE_URL: ${{ secrets.BASE_URL }}
+          USERNAME: ${{ secrets.USERNAME }}
+          PASSWORD: ${{ secrets.PASSWORD }}
+          HTTP_USERNAME: ${{ secrets.HTTP_USERNAME }}
+          HTTP_PASSWORD: ${{ secrets.HTTP_PASSWORD }}
         run: |
           set -euo pipefail
 
