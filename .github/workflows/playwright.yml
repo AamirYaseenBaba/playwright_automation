@@ -94,7 +94,6 @@ jobs:
           BASE_URL: ${{ secrets.E2E_BASE_URL }}
           E2E_USERNAME: ${{ secrets.E2E_USERNAME }}
           E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
-          API_TOKEN: ${{ secrets.API_TOKEN }}
         run: |
           set -euo pipefail
 
