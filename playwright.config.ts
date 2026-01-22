@@ -1,4 +1,9 @@
 import { defineConfig, devices } from '@playwright/test';
+import dotenv from 'dotenv';
+
+dotenv.config({
+  path: `.env.${process.env.NODE_ENV || 'staging'}`,
+});
 
 /**
  * Read environment variables from file.
@@ -22,31 +27,45 @@ export default defineConfig({
   /* Opt out of parallel tests on CI. */
   workers: process.env.CI ? 1 : undefined,
   /* Reporter to use. See https://playwright.dev/docs/test-reporters */
-  reporter: 'html',
+ reporter: process.env.CI ? 'blob' : 'html',
   /* Shared settings for all the projects below. See https://playwright.dev/docs/api/class-testoptions. */
   use: {
     /* Base URL to use in actions like `await page.goto('')`. */
     // baseURL: 'http://localhost:3000',
+     httpCredentials: {
+      username: process.env.HTTP_USERNAME || '',
+      password: process.env.HTTP_PASSWORD || '',
+    },
+    /* Base URL to use in actions like `await page.goto('')`. */
+    baseURL: process.env.BASE_URL,
 
     /* Collect trace when retrying the failed test. See https://playwright.dev/docs/trace-viewer */
     trace: 'on-first-retry',
   },
 
   /* Configure projects for major browsers */
-  projects: [
+   projects: [
+    // Setup project
+    { name: 'setup', testMatch: /.*\.setup\.js/ },
+
     {
       name: 'chromium',
-      use: { ...devices['Desktop Chrome'] },
+      use: {
+        ...devices['Desktop Chrome'],
+        // Use prepared auth state.
+        storageState: 'playwright/.auth/user.json',
+      },
+      dependencies: ['setup'],
     },
 
     {
       name: 'firefox',
-      use: { ...devices['Desktop Firefox'] },
-    },
-
-    {
-      name: 'webkit',
-      use: { ...devices['Desktop Safari'] },
+      use: {
+        ...devices['Desktop Firefox'],
+        // Use prepared auth state.
+        storageState: 'playwright/.auth/user.json',
+      },
+      dependencies: ['setup'],
     },
 
     /* Test against mobile viewports. */
@@ -68,8 +87,7 @@ export default defineConfig({
     //   name: 'Google Chrome',
     //   use: { ...devices['Desktop Chrome'], channel: 'chrome' },
     // },
-  ],
-
+],
   /* Run your local dev server before starting the tests */
   // webServer: {
   //   command: 'npm run start',
