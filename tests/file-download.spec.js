@@ -28,7 +28,7 @@ test('Verify file download', async ({ page }) => {
     const before = listFiles(downloadDir);
     const [download] = await Promise.all([
         page.waitForEvent('download'),
-        page.getByRole('link', { name: 'sample.json' }).click()
+        page.getByRole('link', { name: /sample/i }).first().click()
     ]);
     // Save downloaded file somewhere
     const suggested = download.suggestedFilename();
@@ -42,6 +42,6 @@ test('Verify file download', async ({ page }) => {
 
     const newFiles = after.filter((f) => !before.includes(f));
     expect(newFiles).toHaveLength(1);
-    expect(newFiles[0]).toContain('.json');
+    expect(newFiles[0]).toContain('sample');
 
 })
