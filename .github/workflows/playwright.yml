@@ -179,44 +179,19 @@ jobs:
           path: playwright-report
           retention-days: 14
 
+      - name: Upload Pages artifact
+        if: always() && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: playwright-report
+
   deploy-pages:
-    name: Deploy Playwright report to GitHub Pages
+    name: Deploy report to GitHub Pages
     runs-on: ubuntu-latest
     needs: [merge-report]
     if: always() && github.ref == 'refs/heads/main' && (github.event_name != 'workflow_dispatch' || github.event.inputs.report == 'true')
-
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
-
-    concurrency:
-      group: pages
-      cancel-in-progress: true
-
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-
-    # If merge-report already generated the report in this job workspace, keep this.
-    # If merge-report is a DIFFERENT job, you must download the artifact it produced:
-    - uses: actions/download-artifact@v4
-      with:
-        name: playwright-report
-        path: playwright-report
-
-    - name: Configure GitHub Pages
-      uses: actions/configure-pages@v5
-
-    - name: Upload report as Pages artifact
-      uses: actions/upload-pages-artifact@v4
-      with:
-        path: playwright-report
-
-    - name: Deploy to GitHub Pages
-      id: deployment
-      uses: actions/deploy-pages@v4
+      - uses: actions/deploy-pages@v4
