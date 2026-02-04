@@ -144,4 +144,6 @@ vite.config.ts.timestamp-*
 /blob-report/
 /playwright/.cache/
 /playwright/.auth/
-storageState/
+/playwright/downloads/
+/storageState/
+.github/workflows/copilot-*.yml

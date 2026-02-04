@@ -1,4 +1,4 @@
-import { test, expect } from '../fixtures/test-fixtures';
+import { test, expect } from '../fixtures/test';
 
 test.use({ baseURL: 'http://the-internet.herokuapp.com' });
 test('user can login', async ({ loginPage }) => {
