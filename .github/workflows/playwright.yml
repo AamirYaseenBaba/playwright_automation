@@ -185,6 +185,100 @@ jobs:
         with:
           path: playwright-report
 
+      - name: Generate JSON results
+        id: json-report
+        if: always()
+        run: |
+          npx playwright merge-reports --reporter=json ./all-blob-reports > pw-results.json 2>/dev/null || echo '{}' > pw-results.json
+
+      - name: Parse test results
+        id: results
+        if: always()
+        run: |
+          passed=$(jq '.stats.expected // 0' pw-results.json)
+          failed=$(jq '.stats.unexpected // 0' pw-results.json)
+          skipped=$(jq '.stats.skipped // 0' pw-results.json)
+          duration_ms=$(jq '.stats.duration // 0' pw-results.json)
+          duration=$(echo "$duration_ms" | awk '{printf "%dm %ds", $1/60000, ($1%60000)/1000}')
+          failed_list=$(jq -r '
+            [.. | objects | select(.results?) |
+              select(any(.results[]; .status == "unexpected")) | .title]
+            | unique
+            | if length == 0 then "None" else join("\n") end
+          ' pw-results.json 2>/dev/null || echo "None")
+          echo "passed=$passed" >> "$GITHUB_OUTPUT"
+          echo "failed=$failed" >> "$GITHUB_OUTPUT"
+          echo "skipped=$skipped" >> "$GITHUB_OUTPUT"
+          echo "duration=$duration" >> "$GITHUB_OUTPUT"
+          {
+            echo "failed_list<<DELIM"
+            echo "$failed_list"
+            echo "DELIM"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Notify Slack
+        if: always() && !cancelled()
+        uses: slackapi/slack-github-action@v3
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "${{ needs.e2e-tests.result == 'success' && '✅' || '❌' }} Playwright Tests — ${{ github.ref == 'refs/heads/main' && 'staging' || 'Production' }} (${{ github.event.inputs['test-suite'] || 'all' }})"
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    { "type": "mrkdwn", "text": "*Status:*\n${{ needs.e2e-tests.result == 'success' && 'Passed' || 'Failed' }}" },
+                    { "type": "mrkdwn", "text": "*Environment:*\n${{ github.ref == 'refs/heads/main' && 'staging' || 'Production' }}" },
+                    { "type": "mrkdwn", "text": "*Suite:*\n${{ github.event.inputs['test-suite'] || 'all' }}" },
+                    { "type": "mrkdwn", "text": "*Browser:*\n${{ github.event.inputs.browser || 'chromium' }}" },
+                    { "type": "mrkdwn", "text": "*Triggered by:*\n${{ github.actor }}" }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    { "type": "mrkdwn", "text": "*✅ Passed:*\n${{ steps.results.outputs.passed }}" },
+                    { "type": "mrkdwn", "text": "*❌ Failed:*\n${{ steps.results.outputs.failed }}" },
+                    { "type": "mrkdwn", "text": "*⏭ Skipped:*\n${{ steps.results.outputs.skipped }}" },
+                    { "type": "mrkdwn", "text": "*⏱ Duration:*\n${{ steps.results.outputs.duration }}" }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Failed Tests:*\n${{ steps.results.outputs.failed_list }}"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": ":paperclip: *Full HTML report:* Download the `html-report--attempt-${{ github.run_attempt }}` artifact from the run link below."
+                  }
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "style": "${{ needs.e2e-tests.result == 'success' && 'primary' || 'danger' }}",
+                      "text": { "type": "plain_text", "text": "View Run & Download Report" },
+                      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    }
+                  ]
+                }
+              ]
+            }
+
   deploy-pages:
     name: Deploy report to GitHub Pages
     runs-on: ubuntu-latest
