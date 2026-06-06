@@ -1,5 +1,8 @@
 name: Playwright E2E
 
+# ─────────────────────────────────────────────────────────────────────────────
+# TRIGGERS
+# ─────────────────────────────────────────────────────────────────────────────
 on:
   push:
     branches: [main]
@@ -7,48 +10,82 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
-      test-suite:
-        description: 'Regex/tag to grep (e.g. "@smoke") or blank for all'
-        required: false
-        default: ''
+
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options: [dev, uat, prod]
+
       browser:
-        description: 'Playwright project name (chromium, firefox, webkit)'
+        description: 'Browser to run tests on'
         required: false
         default: 'chromium'
-      headless:
-        description: 'Run headless (true/false). If false, uses --headed'
+        type: choice
+        options: [chromium, firefox, webkit]
+
+      test-suite:
+        description: 'Grep filter — tag or keyword (e.g. @smoke). Blank = all tests'
         required: false
-        default: 'true'
+        default: ''
+        type: string
+
+      shard-count:
+        description: 'Number of parallel shards (2–8)'
+        required: false
+        default: '4'
+        type: choice
+        options: ['2', '4', '6', '8']
+
       retries:
-        description: 'Retries for failed tests'
+        description: 'Retries per failed test'
         required: false
-        default: '0'
-      parallel:
-        description: 'Workers (0 for default)'
+        default: '1'
+        type: choice
+        options: ['0', '1', '2', '3']
+
+      workers:
+        description: 'Parallel workers per shard (blank = Playwright default)'
         required: false
-        default: '0'
+        default: ''
+        type: string
+
       timeout:
-        description: 'Timeout in ms'
+        description: 'Test timeout in ms'
         required: false
         default: '30000'
-      report:
-        description: 'Generate & publish merged HTML report (true/false)'
-        required: false
-        default: 'true'
-      upload-artifacts:
-        description: 'Upload debug artifacts on failure (true/false)'
-        required: false
-        default: 'true'
+        type: choice
+        options: ['15000', '30000', '60000', '120000']
 
+      headed:
+        description: 'Run in headed mode (visible browser)'
+        required: false
+        default: false
+        type: boolean
+
+      upload-artifacts:
+        description: 'Upload traces/screenshots on failure'
+        required: false
+        default: true
+        type: boolean
+
+      notify-slack:
+        description: 'Send Slack notification on completion'
+        required: false
+        default: true
+        type: boolean
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GLOBAL
+# ─────────────────────────────────────────────────────────────────────────────
 concurrency:
-  group: playwright-${{ github.ref }}
+  group: playwright-${{ github.ref }}-${{ github.event.inputs.environment || 'dev' }}
   cancel-in-progress: true
 
 permissions:
   contents: read
   actions: read
-  pages: write
-  id-token: write
 
 defaults:
   run:
@@ -56,236 +93,325 @@ defaults:
 
 env:
   CI: true
-  SHARD_TOTAL: 4
+  # Resolved once here — used by both jobs below
+  ENVIRONMENT:   ${{ github.event.inputs.environment  || 'dev' }}
+  BROWSER:       ${{ github.event.inputs.browser       || 'chromium' }}
+  RETRIES:       ${{ github.event.inputs.retries        || '1' }}
+  TIMEOUT:       ${{ github.event.inputs.timeout        || '30000' }}
+  SHARD_TOTAL:   ${{ github.event.inputs.shard-count   || '4' }}
+  NOTIFY_SLACK:  ${{ github.event.inputs.notify-slack  || 'true' }}
 
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 1 — Sharded test execution
+# ─────────────────────────────────────────────────────────────────────────────
 jobs:
   e2e-tests:
-    name: E2E (shard ${{ matrix.shard }}/4)
+    name: E2E · Shard ${{ matrix.shard }}/${{ github.event.inputs.shard-count || '4' }}
     runs-on: ubuntu-latest
-    environment: ${{ github.ref == 'refs/heads/slack' && 'staging' || 'Production' }}
+
+    # Environment-scoped secrets (BASE_URL, credentials live here)
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+
     strategy:
-      fail-fast: false
+      fail-fast: false   # All shards must finish — partial data breaks the merge
       matrix:
         shard: [1, 2, 3, 4]
 
     container:
-      image: mcr.microsoft.com/playwright:v1.57.0-noble
+      image: mcr.microsoft.com/playwright:v1.50.0-noble
       options: --ipc=host --user 1001
+
     steps:
-      - uses: actions/checkout@v5
-      
-      - name: Cache npm (download cache)
+      - uses: actions/checkout@v4
+
+      - name: Cache pnpm store
         uses: actions/cache@v4
         with:
-          path: ~/.npm
-          key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-npm-
-      - name: Install deps
-        run: npm ci
-      - name: Run Playwright tests (sharded)
-        env:
-          TEST_SUITE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.test-suite || '' }}
-          BROWSER: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.browser || 'chromium' }}
-          HEADLESS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.headless || 'true' }}
-          RETRIES: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.retries || '0' }}
-          WORKERS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.parallel || '0' }}
-          TIMEOUT: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.timeout || '30000' }}
+          path: ~/.local/share/pnpm/store
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm-
 
-          BASE_URL: ${{ secrets.BASE_URL }}
-          USERNAME: ${{ secrets.USERNAME }}
-          PASSWORD: ${{ secrets.PASSWORD }}
-          HTTP_USERNAME: ${{ secrets.HTTP_USERNAME }}
-          HTTP_PASSWORD: ${{ secrets.HTTP_PASSWORD }}
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run Playwright tests · shard ${{ matrix.shard }}/${{ env.SHARD_TOTAL }}
+        env:
+          # ── URLs & credentials from environment-scoped GitHub secrets ────────
+          BASE_URL:        ${{ secrets.BASE_URL }}
+          MAGENTO_URL:     ${{ secrets.MAGENTO_URL }}
+          STRAPI_URL:      ${{ secrets.STRAPI_URL }}
+          AUTH_USERNAME:   ${{ secrets.AUTH_USERNAME }}
+          AUTH_PASSWORD:   ${{ secrets.AUTH_PASSWORD }}
+          HTTP_USERNAME:   ${{ secrets.HTTP_USERNAME }}
+          HTTP_PASSWORD:   ${{ secrets.HTTP_PASSWORD }}
         run: |
           set -euo pipefail
 
-          args=()
-          args+=(--reporter=blob)
-          args+=(--shard="${{ matrix.shard }}/${SHARD_TOTAL}")
-          args+=(--project="${BROWSER}")
-          args+=(--retries="${RETRIES}")
-          args+=(--timeout="${TIMEOUT}")
+          args=(
+            --reporter=blob
+            --shard="${{ matrix.shard }}/${{ env.SHARD_TOTAL }}"
+            --project="${{ env.BROWSER }}"
+            --retries="${{ env.RETRIES }}"
+            --timeout="${{ env.TIMEOUT }}"
+          )
 
-          if [ "${HEADLESS}" != "true" ]; then
+          # Optional: headed mode
+          if [ "${{ github.event.inputs.headed }}" = "true" ]; then
             args+=(--headed)
           fi
 
-          if [ "${WORKERS}" != "0" ]; then
-            args+=(--workers="${WORKERS}")
+          # Optional: worker count
+          WORKERS="${{ github.event.inputs.workers }}"
+          if [ -n "$WORKERS" ] && [ "$WORKERS" != "0" ]; then
+            args+=(--workers="$WORKERS")
           fi
 
-          if [ -n "${TEST_SUITE}" ]; then
-            args+=(--grep="${TEST_SUITE}")
+          # Optional: grep filter
+          TEST_SUITE="${{ github.event.inputs.test-suite }}"
+          if [ -n "$TEST_SUITE" ]; then
+            args+=(--grep="$TEST_SUITE")
           fi
 
-          npx playwright test "${args[@]}"
+          pnpm exec playwright test "${args[@]}"
 
-      - name: Upload blob report (shard)
-        if: always() && (github.event_name != 'workflow_dispatch' || github.event.inputs.report == 'true')
+      - name: Upload blob report · shard ${{ matrix.shard }}
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: blob-report-${{ matrix.shard }}
-          path: blob-report
-          retention-days: 7
+          path: blob-report/
+          retention-days: 1   # Intermediate — only needed until merge job runs
 
-      - name: Upload debug artifacts (failure only)
-        if: failure() && (github.event_name != 'workflow_dispatch' || github.event.inputs.upload-artifacts == 'true')
+      - name: Upload traces & screenshots on failure
+        if: >
+          failure() &&
+          (github.event.inputs.upload-artifacts == '' ||
+           github.event.inputs.upload-artifacts == 'true')
         uses: actions/upload-artifact@v4
         with:
-          name: pw-debug-${{ matrix.shard }}
-          path: test-results
+          name: debug-artifacts-shard-${{ matrix.shard }}
+          path: |
+            test-results/
+            playwright-report/
           retention-days: 7
 
-  merge-report:
-    name: Merge HTML report
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 2 — Merge reports + Slack notification
+# ─────────────────────────────────────────────────────────────────────────────
+  merge-and-notify:
+    name: Merge reports & notify Slack
     runs-on: ubuntu-latest
-    needs: [e2e-tests]
-    if: always() && (github.event_name != 'workflow_dispatch' || github.event.inputs.report == 'true')
-
-    container:
-      image: mcr.microsoft.com/playwright:v1.57.0-noble
-      options: --ipc=host --user 1001
+    needs: e2e-tests
+    if: always()
 
     steps:
-      - uses: actions/checkout@v5
-      
-      - name: Cache npm (download cache)
+      - uses: actions/checkout@v4
+
+      - name: Cache pnpm store
         uses: actions/cache@v4
         with:
-          path: ~/.npm
-          key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-npm-
+          path: ~/.local/share/pnpm/store
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm-
 
-      - name: Install deps
-        run: npm ci
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
-      - name: Download shard blob reports
-        uses: actions/download-artifact@v5
+      - name: Download all blob reports
+        uses: actions/download-artifact@v4
         with:
           pattern: blob-report-*
-          path: all-blob-reports
           merge-multiple: true
+          path: all-blob-reports/
 
-      - name: Merge blob reports -> playwright-report
-        run: npx playwright merge-reports --reporter html ./all-blob-reports
+      - name: Merge blob reports → HTML report
+        run: |
+          pnpm exec playwright merge-reports \
+            --reporter html \
+            --output-folder playwright-report \
+            ./all-blob-reports
+
+      - name: Merge blob reports → JSON (stdout capture)
+        run: |
+          pnpm exec playwright merge-reports \
+            --reporter json \
+            ./all-blob-reports > playwright-report/results.json
 
       - name: Upload merged HTML report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: html-report--attempt-${{ github.run_attempt }}
-          path: playwright-report
+          name: playwright-report-${{ env.ENVIRONMENT }}
+          path: playwright-report/
           retention-days: 14
 
-      - name: Upload Pages artifact
-        if: always() && github.ref == 'refs/heads/main'
-        uses: actions/upload-pages-artifact@v4
-        with:
-          path: playwright-report
-
-      - name: Generate JSON results
-        id: json-report
-        if: always()
-        run: |
-          npx playwright merge-reports --reporter=json ./all-blob-reports > pw-results.json 2>/dev/null || echo '{}' > pw-results.json
-
+      # ── Parse results.json using top-level .stats fields ───────────────────
+      # These are stable, documented keys — not deep suite traversal
       - name: Parse test results
         id: results
         if: always()
         run: |
-          passed=$(jq '.stats.expected // 0' pw-results.json)
-          failed=$(jq '.stats.unexpected // 0' pw-results.json)
-          skipped=$(jq '.stats.skipped // 0' pw-results.json)
-          duration_ms=$(jq '.stats.duration // 0' pw-results.json)
-          duration=$(echo "$duration_ms" | awk '{printf "%dm %ds", $1/60000, ($1%60000)/1000}')
-          failed_list=$(jq -r '
-            [.. | objects | select(.results?) |
-              select(any(.results[]; .status == "unexpected")) | .title]
-            | unique
-            | if length == 0 then "None" else join("\n") end
-          ' pw-results.json 2>/dev/null || echo "None")
-          echo "passed=$passed" >> "$GITHUB_OUTPUT"
-          echo "failed=$failed" >> "$GITHUB_OUTPUT"
-          echo "skipped=$skipped" >> "$GITHUB_OUTPUT"
-          echo "duration=$duration" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          FILE="playwright-report/results.json"
+
+          if [ ! -f "$FILE" ]; then
+            echo "⚠️  results.json not found — defaulting all counts to 0"
+            {
+              echo "passed=0"
+              echo "failed=0"
+              echo "skipped=0"
+              echo "total=0"
+              echo "duration=0s"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # .stats.expected   = tests that matched their expected outcome (passed)
+          # .stats.unexpected = tests that did not (failed / timed out)
+          # .stats.skipped    = intentionally skipped
+          # .stats.duration   = total wall-clock ms across all shards
+          PASSED=$(jq  '.stats.expected   // 0'                    "$FILE")
+          FAILED=$(jq  '.stats.unexpected // 0'                    "$FILE")
+          SKIPPED=$(jq '.stats.skipped    // 0'                    "$FILE")
+          TOTAL=$(jq   '(.stats.expected + .stats.unexpected + .stats.skipped) // 0' "$FILE")
+          DURATION=$(jq '((.stats.duration // 0) / 1000 | round | tostring) + "s"'  "$FILE" | tr -d '"')
+
           {
-            echo "failed_list<<DELIM"
-            echo "$failed_list"
-            echo "DELIM"
+            echo "passed=$PASSED"
+            echo "failed=$FAILED"
+            echo "skipped=$SKIPPED"
+            echo "total=$TOTAL"
+            echo "duration=$DURATION"
           } >> "$GITHUB_OUTPUT"
 
+          echo "✅ Passed=$PASSED ❌ Failed=$FAILED ⏭ Skipped=$SKIPPED ⏱ $DURATION"
+
+      # ── Build emoji bar chart ───────────────────────────────────────────────
+      - name: Build pass/fail bar chart
+        id: chart
+        if: always()
+        run: |
+          PASSED=${{ steps.results.outputs.passed }}
+          FAILED=${{ steps.results.outputs.failed }}
+          SKIPPED=${{ steps.results.outputs.skipped }}
+          TOTAL=${{ steps.results.outputs.total }}
+
+          BAR_WIDTH=20
+          if [ "$TOTAL" -gt 0 ]; then
+            PASS_BARS=$(( PASSED  * BAR_WIDTH / TOTAL ))
+            FAIL_BARS=$(( FAILED  * BAR_WIDTH / TOTAL ))
+            SKIP_BARS=$(( BAR_WIDTH - PASS_BARS - FAIL_BARS ))
+          else
+            PASS_BARS=0; FAIL_BARS=0; SKIP_BARS=$BAR_WIDTH
+          fi
+
+          CHART=""
+          for _ in $(seq 1 $PASS_BARS); do CHART="${CHART}🟩"; done
+          for _ in $(seq 1 $FAIL_BARS); do CHART="${CHART}🟥"; done
+          for _ in $(seq 1 $SKIP_BARS); do CHART="${CHART}⬜"; done
+
+          echo "bar=$CHART" >> "$GITHUB_OUTPUT"
+
+      # ── Slack via curl — no slackapi/slack-github-action version risk ───────
       - name: Notify Slack
-        if: always() && !cancelled()
-        uses: slackapi/slack-github-action@v3
-        with:
-          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
-          webhook-type: incoming-webhook
-          payload: |
-            {
-              "blocks": [
+        if: >
+          always() &&
+          (env.NOTIFY_SLACK == 'true') &&
+          (needs.e2e-tests.result != 'cancelled')
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+
+          PASSED="${{ steps.results.outputs.passed }}"
+          FAILED="${{ steps.results.outputs.failed }}"
+          SKIPPED="${{ steps.results.outputs.skipped }}"
+          TOTAL="${{ steps.results.outputs.total }}"
+          DURATION="${{ steps.results.outputs.duration }}"
+          CHART="${{ steps.chart.outputs.bar }}"
+          OVERALL="${{ needs.e2e-tests.result }}"
+          ENV="${{ env.ENVIRONMENT }}"
+          BROWSER="${{ env.BROWSER }}"
+          BRANCH="${{ github.ref_name }}"
+          ACTOR="${{ github.actor }}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          EVENT="${{ github.event_name }}"
+
+          if [ "$FAILED" = "0" ] && [ "$OVERALL" = "success" ]; then
+            HEADER="✅ E2E Passed — ${ENV}"
+            BUTTON_STYLE="primary"
+          else
+            HEADER="❌ E2E Failed — ${ENV}"
+            BUTTON_STYLE="danger"
+          fi
+
+          # jq builds the payload safely — no manual JSON escaping of variables
+          PAYLOAD=$(jq -n \
+            --arg header   "$HEADER" \
+            --arg chart    "$CHART" \
+            --arg passed   "$PASSED" \
+            --arg failed   "$FAILED" \
+            --arg skipped  "$SKIPPED" \
+            --arg total    "$TOTAL" \
+            --arg duration "$DURATION" \
+            --arg env      "$ENV" \
+            --arg browser  "$BROWSER" \
+            --arg branch   "$BRANCH" \
+            --arg actor    "$ACTOR" \
+            --arg event    "$EVENT" \
+            --arg shards   "${{ env.SHARD_TOTAL }}" \
+            --arg run_url  "$RUN_URL" \
+            --arg btn_style "$BUTTON_STYLE" \
+            '{
+              blocks: [
                 {
-                  "type": "header",
-                  "text": {
-                    "type": "plain_text",
-                    "text": "${{ needs.e2e-tests.result == 'success' && '✅' || '❌' }} Playwright Tests — ${{ github.ref == 'refs/heads/main' && 'staging' || 'Production' }} (${{ github.event.inputs['test-suite'] || 'all' }})"
+                  type: "header",
+                  text: { type: "plain_text", text: $header, emoji: true }
+                },
+                {
+                  type: "section",
+                  text: {
+                    type: "mrkdwn",
+                    text: ("```" + $chart + "```\n🟩 Passed  🟥 Failed  ⬜ Skipped")
                   }
                 },
                 {
-                  "type": "section",
-                  "fields": [
-                    { "type": "mrkdwn", "text": "*Status:*\n${{ needs.e2e-tests.result == 'success' && 'Passed' || 'Failed' }}" },
-                    { "type": "mrkdwn", "text": "*Environment:*\n${{ github.ref == 'refs/heads/main' && 'staging' || 'Production' }}" },
-                    { "type": "mrkdwn", "text": "*Suite:*\n${{ github.event.inputs['test-suite'] || 'all' }}" },
-                    { "type": "mrkdwn", "text": "*Browser:*\n${{ github.event.inputs.browser || 'chromium' }}" },
-                    { "type": "mrkdwn", "text": "*Triggered by:*\n${{ github.actor }}" }
+                  type: "section",
+                  fields: [
+                    { type: "mrkdwn", text: ("*✅ Passed*\n" + $passed + " / " + $total) },
+                    { type: "mrkdwn", text: ("*❌ Failed*\n" + $failed + " / " + $total) },
+                    { type: "mrkdwn", text: ("*⏭ Skipped*\n" + $skipped + " / " + $total) },
+                    { type: "mrkdwn", text: ("*⏱ Duration*\n" + $duration) }
                   ]
                 },
                 {
-                  "type": "section",
-                  "fields": [
-                    { "type": "mrkdwn", "text": "*✅ Passed:*\n${{ steps.results.outputs.passed }}" },
-                    { "type": "mrkdwn", "text": "*❌ Failed:*\n${{ steps.results.outputs.failed }}" },
-                    { "type": "mrkdwn", "text": "*⏭ Skipped:*\n${{ steps.results.outputs.skipped }}" },
-                    { "type": "mrkdwn", "text": "*⏱ Duration:*\n${{ steps.results.outputs.duration }}" }
+                  type: "section",
+                  fields: [
+                    { type: "mrkdwn", text: ("*Environment*\n`" + $env + "`") },
+                    { type: "mrkdwn", text: ("*Browser*\n`" + $browser + "`") },
+                    { type: "mrkdwn", text: ("*Branch*\n`" + $branch + "`") },
+                    { type: "mrkdwn", text: ("*Triggered by*\n" + $actor + " via " + $event) },
+                    { type: "mrkdwn", text: ("*Shards*\n" + $shards) }
                   ]
                 },
                 {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": "*Failed Tests:*\n${{ steps.results.outputs.failed_list }}"
-                  }
-                },
-                {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": ":paperclip: *Full HTML report:* Download the `html-report--attempt-${{ github.run_attempt }}` artifact from the run link below."
-                  }
-                },
-                {
-                  "type": "actions",
-                  "elements": [
+                  type: "actions",
+                  elements: [
                     {
-                      "type": "button",
-                      "style": "${{ needs.e2e-tests.result == 'success' && 'primary' || 'danger' }}",
-                      "text": { "type": "plain_text", "text": "View Run & Download Report" },
-                      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                      type: "button",
+                      style: $btn_style,
+                      text: { type: "plain_text", text: "View Run & Report" },
+                      url: $run_url
                     }
                   ]
                 }
               ]
-            }
+            }')
 
-  deploy-pages:
-    name: Deploy report to GitHub Pages
-    runs-on: ubuntu-latest
-    needs: [merge-report]
-    if: always() && github.ref == 'refs/heads/main' && (github.event_name != 'workflow_dispatch' || github.event.inputs.report == 'true')
-    environment:
-      name: github-pages
+          curl -s -X POST "$SLACK_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"
 
-    steps:
-      - uses: actions/deploy-pages@v4
+      - name: Fail workflow if tests failed
+        if: needs.e2e-tests.result == 'failure'
+        run: exit 1
