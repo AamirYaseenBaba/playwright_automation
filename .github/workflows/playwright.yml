@@ -70,6 +70,12 @@ on:
         default: true
         type: boolean
 
+      report:
+        description: 'Deploy merged report to GitHub Pages'
+        required: false
+        default: 'true'
+        type: boolean
+
       notify-slack:
         description: 'Send Slack notification on completion'
         required: false
@@ -261,7 +267,7 @@ jobs:
     name: Deploy report to GitHub Pages
     runs-on: ubuntu-latest
     needs: [merge-report]
-    if: always() && github.ref == 'refs/heads/main' && (github.event_name != 'workflow_dispatch' || github.event.inputs.report == 'true')
+    if: always() && github.ref == 'refs/heads/slack' && (github.event_name != 'workflow_dispatch' || github.event.inputs.report == 'true')
     environment:
       name: github-pages
 
