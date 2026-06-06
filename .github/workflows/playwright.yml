@@ -196,10 +196,10 @@ jobs:
           retention-days: 7
 
 # ─────────────────────────────────────────────────────────────────────────────
-# JOB 2 — Merge reports + Slack notification
+# JOB 2 — Merge reports
 # ─────────────────────────────────────────────────────────────────────────────
-  merge-and-notify:
-    name: Merge reports & notify Slack
+  merge-report:
+    name: Merge reports
     runs-on: ubuntu-latest
     needs: e2e-tests
     if: always()
@@ -244,8 +244,48 @@ jobs:
           path: playwright-report/
           retention-days: 14
 
-      # ── Parse results.json using top-level .stats fields ───────────────────
-      # These are stable, documented keys — not deep suite traversal
+      - name: Configure GitHub Pages
+        run: |
+          mkdir -p _site
+          cp -r playwright-report/* _site/
+
+      - name: Upload artifact for GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '_site'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 3 — Deploy to GitHub Pages
+# ─────────────────────────────────────────────────────────────────────────────
+  deploy-pages:
+    name: Deploy report to GitHub Pages
+    runs-on: ubuntu-latest
+    needs: [merge-report]
+    if: always() && github.ref == 'refs/heads/main' && (github.event_name != 'workflow_dispatch' || github.event.inputs.report == 'true')
+    environment:
+      name: github-pages
+
+    steps:
+      - uses: actions/deploy-pages@v4
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 4 — Notify Slack
+# ─────────────────────────────────────────────────────────────────────────────
+  notify-slack:
+    name: Notify Slack
+    runs-on: ubuntu-latest
+    needs: [merge-report, deploy-pages]
+    if: always()
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download results.json from merge-report artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: playwright-report-${{ env.ENVIRONMENT }}
+          path: playwright-report/
+
       - name: Parse test results
         id: results
         if: always()
@@ -265,10 +305,6 @@ jobs:
             exit 0
           fi
 
-          # .stats.expected   = tests that matched their expected outcome (passed)
-          # .stats.unexpected = tests that did not (failed / timed out)
-          # .stats.skipped    = intentionally skipped
-          # .stats.duration   = total wall-clock ms across all shards
           PASSED=$(jq  '.stats.expected   // 0'                    "$FILE")
           FAILED=$(jq  '.stats.unexpected // 0'                    "$FILE")
           SKIPPED=$(jq '.stats.skipped    // 0'                    "$FILE")
@@ -285,7 +321,6 @@ jobs:
 
           echo "✅ Passed=$PASSED ❌ Failed=$FAILED ⏭ Skipped=$SKIPPED ⏱ $DURATION"
 
-      # ── Build emoji bar chart ───────────────────────────────────────────────
       - name: Build pass/fail bar chart
         id: chart
         if: always()
@@ -311,12 +346,11 @@ jobs:
 
           echo "bar=$CHART" >> "$GITHUB_OUTPUT"
 
-      # ── Slack via curl — no slackapi/slack-github-action version risk ───────
       - name: Notify Slack
         if: >
           always() &&
           (env.NOTIFY_SLACK == 'true') &&
-          (needs.e2e-tests.result != 'cancelled')
+          (needs.merge-report.result != 'cancelled')
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
@@ -328,13 +362,14 @@ jobs:
           TOTAL="${{ steps.results.outputs.total }}"
           DURATION="${{ steps.results.outputs.duration }}"
           CHART="${{ steps.chart.outputs.bar }}"
-          OVERALL="${{ needs.e2e-tests.result }}"
+          OVERALL="${{ needs.merge-report.result }}"
           ENV="${{ env.ENVIRONMENT }}"
           BROWSER="${{ env.BROWSER }}"
           BRANCH="${{ github.ref_name }}"
           ACTOR="${{ github.actor }}"
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           EVENT="${{ github.event_name }}"
+          PAGES_URL="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/playwright-report/"
 
           if [ "$FAILED" = "0" ] && [ "$OVERALL" = "success" ]; then
             HEADER="✅ E2E Passed — ${ENV}"
@@ -360,6 +395,7 @@ jobs:
             --arg event    "$EVENT" \
             --arg shards   "${{ env.SHARD_TOTAL }}" \
             --arg run_url  "$RUN_URL" \
+            --arg pages_url "$PAGES_URL" \
             --arg btn_style "$BUTTON_STYLE" \
             '{
               blocks: [
@@ -401,6 +437,11 @@ jobs:
                       style: $btn_style,
                       text: { type: "plain_text", text: "View Run & Report" },
                       url: $run_url
+                    },
+                    {
+                      type: "button",
+                      text: { type: "plain_text", text: "View Deployed Report" },
+                      url: $pages_url
                     }
                   ]
                 }
@@ -410,7 +451,3 @@ jobs:
           curl -s -X POST "$SLACK_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD"
-
-      - name: Fail workflow if tests failed
-        if: needs.e2e-tests.result == 'failure'
-        run: exit 1
