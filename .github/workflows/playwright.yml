@@ -124,15 +124,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache pnpm store
+      - name: Cache npm store
         uses: actions/cache@v4
         with:
-          path: ~/.local/share/pnpm/store
-          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
-          restore-keys: ${{ runner.os }}-pnpm-
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: ${{ runner.os }}-npm-
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: npm ci
 
       - name: Run Playwright tests · shard ${{ matrix.shard }}/${{ env.SHARD_TOTAL }}
         env:
@@ -172,7 +172,7 @@ jobs:
             args+=(--grep="$TEST_SUITE")
           fi
 
-          pnpm exec playwright test "${args[@]}"
+          npx playwright test "${args[@]}"
 
       - name: Upload blob report · shard ${{ matrix.shard }}
         if: always()
@@ -207,15 +207,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache pnpm store
+      - name: Cache npm store
         uses: actions/cache@v4
         with:
-          path: ~/.local/share/pnpm/store
-          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
-          restore-keys: ${{ runner.os }}-pnpm-
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: ${{ runner.os }}-npm-
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: npm ci
 
       - name: Download all blob reports
         uses: actions/download-artifact@v4
@@ -226,14 +226,14 @@ jobs:
 
       - name: Merge blob reports → HTML report
         run: |
-          pnpm exec playwright merge-reports \
+          npx playwright merge-reports \
             --reporter html \
             --output-folder playwright-report \
             ./all-blob-reports
 
       - name: Merge blob reports → JSON (stdout capture)
         run: |
-          pnpm exec playwright merge-reports \
+          npx playwright merge-reports \
             --reporter json \
             ./all-blob-reports > playwright-report/results.json
 
