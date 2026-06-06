@@ -92,6 +92,8 @@ concurrency:
 permissions:
   contents: read
   actions: read
+  pages: write
+  id-token: write
 
 defaults:
   run:
