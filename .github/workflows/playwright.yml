@@ -118,7 +118,7 @@ jobs:
         shard: [1, 2, 3, 4]
 
     container:
-      image: mcr.microsoft.com/playwright:v1.50.0-noble
+      image: mcr.microsoft.com/playwright:v1.57.0-noble
       options: --ipc=host --user 1001
 
     steps:
@@ -228,7 +228,7 @@ jobs:
         run: |
           npx playwright merge-reports \
             --reporter html \
-            --output-folder playwright-report \
+            --output playwright-report \
             ./all-blob-reports
 
       - name: Merge blob reports → JSON (stdout capture)
