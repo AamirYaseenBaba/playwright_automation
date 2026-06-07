@@ -377,7 +377,7 @@ jobs:
           ACTOR="${{ github.actor }}"
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           EVENT="${{ github.event_name }}"
-          PAGES_URL="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/playwright-report/"
+          PAGES_URL="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
 
           if [ "$FAILED" = "0" ] && [ "$OVERALL" = "success" ]; then
             HEADER="✅ E2E Passed — ${ENV}"
