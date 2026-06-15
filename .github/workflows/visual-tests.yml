@@ -1,0 +1,326 @@
+name: Visual Capture Tests
+
+# Manually triggered from the Actions tab. The "Run workflow" UI lets QA
+# pick the branch to run on (top-right dropdown) and the environment to
+# capture against (input below). Each run produces a downloadable artifact
+# containing the full-page PNGs for review.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to capture against'
+        required: true
+        type: choice
+        options:
+          - dev
+          - uat
+          - prod
+        default: 'prod'
+      label:
+        description: 'Optional label (e.g. "before" / "after" / version) — appended to capture filenames so same-day runs do not overwrite each other'
+        required: false
+        type: string
+        default: ''
+      update_baselines:
+        description: 'Regenerate compare-mode baselines (--update-snapshots). Use when bootstrapping a new spec or after an intentional visual change. The regenerated baselines are auto-committed and pushed to the selected branch — no manual download/commit needed.'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  capture:
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    # Use the official Playwright container so every run has identical fonts,
+    # rendering engine, and OS libs. This is critical for visual regression —
+    # without it, screenshot diffs can fail purely due to font-rendering
+    # differences between runner instances, not actual UI changes.
+    # The image tag MUST match the @playwright/test version in package.json.
+    # Update both together: mcr.microsoft.com/playwright:v<version>-noble
+    container:
+      image: mcr.microsoft.com/playwright:v1.52.0-noble
+      options: --user 1001
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.2
+
+      # Node is already present in the Playwright container image, but
+      # setup-node is still used here to wire up pnpm caching via the
+      # cache input. We do NOT install browsers — they are baked into
+      # the container image already.
+      - name: Use Node.js LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Fail fast if the target env is unreachable or htaccess auth is
+      # misconfigured. Without this, an empty/missing <ENV>_HTACCESS_* secret
+      # produces a 401 wall that makes EVERY capture time out on its
+      # readiness gate — ~40 min to surface "auth is broken". This probe
+      # turns that into a ~20s failure that names the exact secret to fix.
+      # (See VR run 26494733465: DEV_HTACCESS_* were added ~20 min mid-run,
+      # so the whole dev suite 401'd and timed out.)
+      - name: Verify environment is reachable (auth pre-check)
+        env:
+          TEST_ENV: ${{ inputs.environment }}
+          DEV_URL: ${{ secrets.DEV_URL }}
+          UAT_URL: ${{ secrets.UAT_URL }}
+          PROD_URL: ${{ secrets.PROD_URL }}
+          HTACCESS_USERNAME: ${{ secrets.HTACCESS_USERNAME }}
+          HTACCESS_PASSWORD: ${{ secrets.HTACCESS_PASSWORD }}
+          DEV_HTACCESS_USERNAME: ${{ secrets.DEV_HTACCESS_USERNAME }}
+          DEV_HTACCESS_PASSWORD: ${{ secrets.DEV_HTACCESS_PASSWORD }}
+          UAT_HTACCESS_USERNAME: ${{ secrets.UAT_HTACCESS_USERNAME }}
+          UAT_HTACCESS_PASSWORD: ${{ secrets.UAT_HTACCESS_PASSWORD }}
+          PROD_HTACCESS_USERNAME: ${{ secrets.PROD_HTACCESS_USERNAME }}
+          PROD_HTACCESS_PASSWORD: ${{ secrets.PROD_HTACCESS_PASSWORD }}
+        run: |
+          set -uo pipefail
+          ENVU=$(printf '%s' "$TEST_ENV" | tr '[:lower:]' '[:upper:]')
+          base_var="${ENVU}_URL"
+          user_var="${ENVU}_HTACCESS_USERNAME"
+          pass_var="${ENVU}_HTACCESS_PASSWORD"
+          # Strip stray whitespace/newlines (a trailing newline in a secret
+          # is the classic "Malformed URL" / silent-401 cause).
+          BASE=$(printf '%s' "${!base_var:-}" | tr -d '[:space:]')
+          USER=$(printf '%s' "${!user_var:-$HTACCESS_USERNAME}" | tr -d '\r\n')
+          PASS=$(printf '%s' "${!pass_var:-$HTACCESS_PASSWORD}" | tr -d '\r\n')
+          if [ -z "$BASE" ]; then
+            echo "::error::${base_var} secret is empty — set the frontend base URL for '${TEST_ENV}'."
+            exit 1
+          fi
+          BASE="${BASE%/}"
+          auth=()
+          if [ -n "$USER" ] && [ -n "$PASS" ]; then auth=(-u "${USER}:${PASS}"); fi
+          # `${auth[@]+...}` so an empty array doesn't trip `set -u`
+          # (the no-htaccess case, e.g. prod).
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 ${auth[@]+"${auth[@]}"} "${BASE}/")
+          echo "Auth pre-check: ${TEST_ENV} home -> HTTP ${code}"
+          case "$code" in
+            401|403)
+              echo "::error::'${TEST_ENV}' returned HTTP ${code} — htaccess auth failed. Check the ${user_var} / ${pass_var} repo secrets (or the HTACCESS_* fallbacks)."
+              exit 1 ;;
+            000)
+              echo "::error::Could not reach ${BASE}/ (timeout/DNS). Check the ${base_var} secret."
+              exit 1 ;;
+            5*)
+              echo "::error::'${TEST_ENV}' returned HTTP ${code} — backend appears down."
+              exit 1 ;;
+          esac
+
+      # Compare runs (NOT bootstrap) restore the committed-elsewhere golden
+      # baselines from the most recent `vr-baselines-<env>` artifact so
+      # `toHaveScreenshot` has something to diff against. Baselines are NOT
+      # stored in git (the full set is ~350 MB+ of PNGs — too large to push),
+      # they live as workflow artifacts produced by a bootstrap run. The
+      # artifact's internal paths begin at `<spec>.spec.ts-snapshots/...`,
+      # so we unzip into `playwright-tests/visual_tests/`.
+      - name: Restore baselines (compare runs)
+        if: ${{ !inputs.update_baselines }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          NAME="vr-baselines-${{ inputs.environment }}"
+          ID=$(gh api "repos/${{ github.repository }}/actions/artifacts?name=${NAME}&per_page=1" --jq '.artifacts[0].id // empty')
+          if [ -z "$ID" ]; then
+            echo "::warning::No '${NAME}' artifact found — compare-mode specs will fail with \"snapshot doesn't exist\". Run this workflow once with 'Regenerate baselines' ticked to bootstrap ${{ inputs.environment }} baselines."
+            exit 0
+          fi
+          echo "Restoring baselines from artifact '${NAME}' (id ${ID})."
+          gh api "repos/${{ github.repository }}/actions/artifacts/${ID}/zip" > /tmp/baselines.zip
+          mkdir -p playwright-tests/visual_tests
+          unzip -o -q /tmp/baselines.zip -d playwright-tests/visual_tests
+          echo "Restored $(find playwright-tests/visual_tests -path '*-snapshots*' -name '*.png' | wc -l) baseline images."
+
+      - name: Run visual capture suite
+        id: run-vr
+        continue-on-error: true
+        env:
+          CI: true
+          TEST_ENV: ${{ inputs.environment }}
+          VR_LABEL: ${{ inputs.label }}
+          DEV_URL: ${{ secrets.DEV_URL }}
+          UAT_URL: ${{ secrets.UAT_URL }}
+          PROD_URL: ${{ secrets.PROD_URL }}
+          HTACCESS_USERNAME: ${{ secrets.HTACCESS_USERNAME }}
+          HTACCESS_PASSWORD: ${{ secrets.HTACCESS_PASSWORD }}
+          DEV_HTACCESS_USERNAME: ${{ secrets.DEV_HTACCESS_USERNAME }}
+          DEV_HTACCESS_PASSWORD: ${{ secrets.DEV_HTACCESS_PASSWORD }}
+          UAT_HTACCESS_USERNAME: ${{ secrets.UAT_HTACCESS_USERNAME }}
+          UAT_HTACCESS_PASSWORD: ${{ secrets.UAT_HTACCESS_PASSWORD }}
+          PROD_HTACCESS_USERNAME: ${{ secrets.PROD_HTACCESS_USERNAME }}
+          PROD_HTACCESS_PASSWORD: ${{ secrets.PROD_HTACCESS_PASSWORD }}
+          DEV_STRAPI_URL: ${{ secrets.DEV_STRAPI_URL }}
+          UAT_STRAPI_URL: ${{ secrets.UAT_STRAPI_URL }}
+          PROD_STRAPI_URL: ${{ secrets.PROD_STRAPI_URL }}
+          # Tell Playwright where to write the JSON reporter output so the
+          # "Parse results" step can reliably find it. Without this env var
+          # the file lands at the project root (results.json) which is easy
+          # to miss; explicit path avoids the root-vs-test-results ambiguity.
+          PLAYWRIGHT_JSON_OUTPUT_NAME: test-results/results.json
+        # `--workers=3` overrides the project-wide CI serial default for
+        # this workflow only. VR specs are stateless so parallel runs are
+        # safe here — unlike the functional E2E workflow which shares state.
+        # `--reporter=json,html` is explicit so parse + report steps always
+        # have their files regardless of playwright.config.ts reporter setup.
+        run: |
+          pnpm exec playwright test playwright-tests/visual_tests \
+            --project=visual-mobile \
+            --project=visual-tablet \
+            --project=visual-desktop \
+            --workers=3 \
+            --reporter=json,html \
+            ${{ inputs.update_baselines && '--update-snapshots' || '' }}
+
+      - name: Upload captures (PNGs)
+        uses: actions/upload-artifact@v4
+        if: always() && !cancelled()
+        with:
+          name: vr-captures-${{ inputs.environment }}${{ inputs.label && format('-{0}', inputs.label) || '' }}
+          path: playwright-tests/visual_tests/captures/
+          retention-days: 30
+          if-no-files-found: warn
+
+      # Bootstrap runs publish the regenerated baselines as the golden
+      # `vr-baselines-<env>` artifact. This is the source of truth that
+      # compare runs restore from (see "Restore baselines" above) — the
+      # baselines are deliberately NOT committed to git (~350 MB+ of PNGs).
+      # Retention is the max 90 days; a fresh bootstrap supersedes it (the
+      # restore step always picks the most recent artifact for the env).
+      - name: Upload compare-mode baselines
+        if: always() && !cancelled() && inputs.update_baselines
+        uses: actions/upload-artifact@v4
+        with:
+          name: vr-baselines-${{ inputs.environment }}
+          path: playwright-tests/visual_tests/**/*-snapshots/**
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        if: always() && !cancelled()
+        with:
+          name: vr-report-${{ inputs.environment }}${{ inputs.label && format('-{0}', inputs.label) || '' }}
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 30
+          if-no-files-found: warn
+
+      # Probe both possible JSON output locations — explicit env-var path
+      # first, then the Playwright default root path — so the step is
+      # resilient to misconfigured playwright.config.ts reporter settings.
+      - name: Parse results
+        id: results
+        if: always() && !cancelled()
+        run: |
+          RESULTS_FILE=""
+          if [ -f "test-results/results.json" ]; then
+            RESULTS_FILE="test-results/results.json"
+          elif [ -f "results.json" ]; then
+            RESULTS_FILE="results.json"
+          fi
+
+          if [ -n "$RESULTS_FILE" ]; then
+            echo "Parsing results from: $RESULTS_FILE"
+            PASSED=$(jq '.stats.expected // 0'  "$RESULTS_FILE")
+            FAILED=$(jq '.stats.unexpected // 0' "$RESULTS_FILE")
+            SKIPPED=$(jq '.stats.skipped // 0'  "$RESULTS_FILE")
+            TOTAL=$(jq '.stats.total // 0'       "$RESULTS_FILE")
+            DURATION=$(jq '((.stats.duration // 0) / 1000) | round' "$RESULTS_FILE")
+            echo "passed=$PASSED"        >> $GITHUB_OUTPUT
+            echo "failed=$FAILED"        >> $GITHUB_OUTPUT
+            echo "skipped=$SKIPPED"      >> $GITHUB_OUTPUT
+            echo "total=$TOTAL"          >> $GITHUB_OUTPUT
+            echo "duration=${DURATION}s" >> $GITHUB_OUTPUT
+          else
+            echo "::warning::results.json not found at test-results/results.json or results.json — check reporter config in playwright.config.ts"
+            echo "passed=N/A"   >> $GITHUB_OUTPUT
+            echo "failed=N/A"   >> $GITHUB_OUTPUT
+            echo "skipped=N/A"  >> $GITHUB_OUTPUT
+            echo "total=N/A"    >> $GITHUB_OUTPUT
+            echo "duration=N/A" >> $GITHUB_OUTPUT
+          fi
+
+      # Logs all parsed values to the Actions console so you can confirm
+      # the parse step produced real numbers without opening the Slack message.
+      - name: Debug parsed outputs
+        if: always() && !cancelled()
+        run: |
+          echo "Passed:   ${{ steps.results.outputs.passed }}"
+          echo "Failed:   ${{ steps.results.outputs.failed }}"
+          echo "Skipped:  ${{ steps.results.outputs.skipped }}"
+          echo "Total:    ${{ steps.results.outputs.total }}"
+          echo "Duration: ${{ steps.results.outputs.duration }}"
+
+      - name: Notify Slack
+        if: always() && !cancelled()
+        uses: slackapi/slack-github-action@v3
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "${{ steps.run-vr.outcome == 'success' && '📸' || '❌' }} Visual Captures — ${{ inputs.environment }}${{ inputs.label && format(' ({0})', inputs.label) || '' }}"
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    { "type": "mrkdwn", "text": "*Status:*\n${{ steps.run-vr.outcome == 'success' && 'Captured' || 'Failed' }}" },
+                    { "type": "mrkdwn", "text": "*Environment:*\n${{ inputs.environment }}" },
+                    { "type": "mrkdwn", "text": "*Branch:*\n${{ github.ref_name }}" },
+                    { "type": "mrkdwn", "text": "*Triggered by:*\n${{ github.actor }}" }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    { "type": "mrkdwn", "text": "*✅ Passed:*\n${{ steps.results.outputs.passed }}" },
+                    { "type": "mrkdwn", "text": "*❌ Failed:*\n${{ steps.results.outputs.failed }}" },
+                    { "type": "mrkdwn", "text": "*⏭ Skipped:*\n${{ steps.results.outputs.skipped }}" },
+                    { "type": "mrkdwn", "text": "*⏱ Duration:*\n${{ steps.results.outputs.duration }}" }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": ":paperclip: *Captures & HTML report:* Download the `vr-captures-${{ inputs.environment }}${{ inputs.label && format('-{0}', inputs.label) || '' }}` artifact from the run link below."
+                  }
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "style": "${{ steps.run-vr.outcome == 'success' && 'primary' || 'danger' }}",
+                      "text": { "type": "plain_text", "text": "View Run & Download Captures" },
+                      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    }
+                  ]
+                }
+              ]
+            }
+
+      - name: Fail job if capture step failed
+        if: steps.run-vr.outcome == 'failure'
+        run: exit 1
